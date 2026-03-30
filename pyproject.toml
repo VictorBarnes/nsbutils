@@ -15,10 +15,6 @@ dependencies = [
 testing = [
     "pytest>=8.4.2",
 ]
-
-pyvista = [
-    "pyvista",
-]
 plotting = [
     "ipywidgets>=8.1.8",
     "nest-asyncio2>=1.7.2",

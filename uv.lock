@@ -2122,10 +2122,6 @@ plotting = [
     { name = "trame-vtk" },
     { name = "trame-vuetify" },
 ]
-pyvista = [
-    { name = "pyvista", version = "0.46.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
-    { name = "pyvista", version = "0.47.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
-]
 testing = [
     { name = "pytest", version = "8.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "pytest", version = "9.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
@@ -2144,14 +2140,13 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.0.2" },
     { name = "pytest", marker = "extra == 'testing'", specifier = ">=8.4.2" },
     { name = "pyvista", marker = "extra == 'plotting'", specifier = ">=0.46.5" },
-    { name = "pyvista", marker = "extra == 'pyvista'" },
     { name = "scipy", specifier = ">=1.13.1" },
     { name = "surfplot", specifier = ">=0.2.0" },
     { name = "trame", marker = "extra == 'plotting'", specifier = ">=3.12.0" },
     { name = "trame-vtk", marker = "extra == 'plotting'", specifier = ">=2.11.6" },
     { name = "trame-vuetify", marker = "extra == 'plotting'", specifier = ">=3.2.1" },
 ]
-provides-extras = ["testing", "pyvista", "plotting", "tutorials"]
+provides-extras = ["testing", "plotting", "tutorials"]
 
 [[package]]
 name = "numpy"
