@@ -3,9 +3,10 @@ name = "nsbutils"
 version = "0.1.0"
 description = "Neuroimaging tools developed by the Neural Systems and Behaviour Lab"
 readme = "README.rst"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "matplotlib>=3.9.4",
+    "neuromodes @ git+https://github.com/NSBLab/neuromodes.git@refs/pull/15/head",
     "numpy>=2.0.2",
     "scipy>=1.13.1",
     "surfplot>=0.2.0",
@@ -16,6 +17,8 @@ testing = [
     "pytest>=8.4.2",
 ]
 plotting = [
+    "imageio>=2.37.2",
+    "imageio-ffmpeg>=0.6.0",
     "ipywidgets>=8.1.8",
     "nest-asyncio2>=1.7.2",
     "pyvista>=0.46.5",

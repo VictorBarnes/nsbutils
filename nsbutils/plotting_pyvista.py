@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union, TYPE_CHECKING
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,10 +19,23 @@ import pyvista as pv
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
-    from numpy.typing import NDArray
 
 
 _DEFAULT_PANEL_SIZE: Tuple[int, int] = (400, 300)  # (width, height) in pixels
+
+
+def _validate_clim(clim: Optional[Tuple[float, float]]) -> Optional[Tuple[float, float]]:
+    if clim is None:
+        return None
+    if not isinstance(clim, (tuple, list)) or len(clim) != 2:
+        raise ValueError("`clim` must be a (vmin, vmax) tuple.")
+    vmin = float(clim[0])
+    vmax = float(clim[1])
+    if not (np.isfinite(vmin) and np.isfinite(vmax)):
+        raise ValueError("`clim` values must be finite.")
+    if not (vmin < vmax):
+        raise ValueError("`clim` must satisfy vmin < vmax.")
+    return vmin, vmax
 
 
 @dataclass(frozen=True)
@@ -215,6 +228,59 @@ def _prepare_vertex_scalars(
     return vertex_data, roi_labels
 
 
+def _prepare_timeseries_scalars(
+    data_timeseries: np.ndarray,
+    rois: Optional[np.ndarray],
+    n_verts: int,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Validate and normalize timeseries scalars.
+
+    Accepts either vertex-wise timeseries (n_verts, n_frames) or ROI-wise timeseries
+    (n_rois, n_frames) when `rois` is provided.
+
+    Returns (vertex_timeseries, roi_labels). If roi_labels is provided, masked
+    vertices (roi==0) are set to NaN across all frames.
+    """
+
+    roi_labels: Optional[np.ndarray] = None
+    if rois is not None:
+        roi_labels = np.asarray(rois)
+        if roi_labels.shape != (n_verts,):
+            raise ValueError(
+                f"ROIs shape {roi_labels.shape} does not match mesh of shape (n_verts,) = ({n_verts},)."
+            )
+
+    arr = np.asarray(data_timeseries)
+    if arr.ndim != 2:
+        raise ValueError(
+            "`data_timeseries` must be a 2D array of shape (n_verts, n_frames) or (n_rois, n_frames)."
+        )
+
+    if arr.shape[0] == n_verts:
+        vertex_ts = arr.astype(float, copy=False)
+    else:
+        if roi_labels is None:
+            raise ValueError(
+                f"`data_timeseries` shape {arr.shape} does not match mesh vertices ({n_verts},)."
+            )
+        n_rois = int(np.nanmax(roi_labels))
+        if arr.shape[0] != n_rois:
+            raise ValueError(
+                f"`data_timeseries` shape {arr.shape} does not match number of ROIs ({n_rois}, n_frames)."
+            )
+
+        n_frames = arr.shape[1]
+        vertex_ts = np.zeros((n_verts, n_frames), dtype=float)
+        for roi_id in range(1, n_rois + 1):
+            vertex_ts[roi_labels == roi_id, :] = arr[roi_id - 1, :]
+
+    if roi_labels is not None:
+        vertex_ts = vertex_ts.copy()
+        vertex_ts[roi_labels == 0, :] = np.nan
+
+    return vertex_ts, roi_labels
+
+
 def _rh_view_swap(view: str) -> str:
     rh_view_swap = {
         "lateral": "medial",
@@ -304,6 +370,88 @@ def _polydata_from_nan_separated_segments(pv: Any, xe: np.ndarray, ye: np.ndarra
     return poly
 
 
+def _add_surface_to_plotter(
+    plotter: Any,
+    surf: Any,
+    data: Optional[np.ndarray],
+    rois: Optional[np.ndarray],
+    *,
+    cbar: bool,
+    cmap: Union[str, Any],
+    mesh_edges: bool,
+    roi_outlines: bool,
+    scalar_bar_args: Optional[Dict[str, Any]],
+    clim: Optional[Tuple[float, float]],
+) -> Tuple[Any, Optional[Any], Optional[np.ndarray]]:
+    """Add a surface mesh to a plotter and return (mesh_used, actor, roi_labels)."""
+
+    _apply_camera_headlight(plotter)
+
+    mesh, n_verts = _load_surface(surf)
+    vertex_data, roi_labels = _prepare_vertex_scalars(data, rois, n_verts)
+    validated_clim = _validate_clim(clim)
+
+    show_scalar_bar = bool(cbar and vertex_data is not None)
+    sb_args = {**_default_scalar_bar_args(), **(scalar_bar_args or {})} if show_scalar_bar else {}
+
+    actor = None
+    mesh_used = mesh
+    if vertex_data is None:
+        plotter.add_mesh(
+            mesh,
+            color="lightgrey",
+            smooth_shading=True,
+            show_edges=mesh_edges,
+            edge_color="black",
+            line_width=0.5,
+            ambient=0.01,
+            diffuse=1,
+            specular=0.1,
+            roughness=1e-6,
+        )
+    else:
+        mesh_used = mesh.copy(deep=False)
+        mesh_used.point_data["scalars"] = vertex_data
+        actor = plotter.add_mesh(
+            mesh_used,
+            scalars="scalars",
+            cmap=cmap,
+            nan_color="lightgrey",
+            smooth_shading=True,
+            show_edges=mesh_edges,
+            edge_color="black",
+            line_width=0.5,
+            show_scalar_bar=False,
+            clim=validated_clim,
+            ambient=0.01,
+            diffuse=1,
+            specular=0.1,
+            roughness=1e-6,
+        )
+
+        if show_scalar_bar:
+            user_title = None
+            if "title" in sb_args:
+                user_title = sb_args.get("title")
+                sb_args = {k: v for k, v in sb_args.items() if k != "title"}
+
+            renderer_idx = getattr(getattr(plotter, "renderers", None), "active_index", 0)
+            internal_title = f"cbar-{renderer_idx}"
+            scalar_bar = plotter.add_scalar_bar(title=internal_title, mapper=actor.mapper, **sb_args)
+            if user_title is None:
+                scalar_bar.SetTitle("")
+            else:
+                scalar_bar.SetTitle(str(user_title))
+
+    if roi_outlines and roi_labels is not None:
+        xe, ye, ze = compute_roi_midline_edges(mesh_used.points, mesh_used.faces.reshape(-1, 4)[:, 1:], roi_labels)
+        outline_poly = _polydata_from_nan_separated_segments(pv, xe, ye, ze)
+        if outline_poly.n_points:
+            plotter.add_mesh(outline_poly, color="black", line_width=1.7)
+
+    return mesh_used, actor, roi_labels
+
+
 def plot_surf_single(
     surf: Any,
     data: Optional[np.ndarray] = None,
@@ -320,6 +468,7 @@ def plot_surf_single(
     *,
     ax: Optional[Axes] = None,
     scale: float = 1.0,
+    clim: Optional[Tuple[float, float]] = None,
     scalar_bar_args: Optional[Dict[str, Any]] = None,
 ) -> Optional[Any]:
     """Render a single surface into a PyVista subplot or embed into a Matplotlib axis.
@@ -351,6 +500,7 @@ def plot_surf_single(
                 cmap=cmap,
                 mesh_edges=mesh_edges,
                 roi_outlines=roi_outlines,
+                clim=clim,
                 scalar_bar_args=scalar_bar_args,
             )
             image = p.screenshot(return_img=True, transparent_background=False)
@@ -368,71 +518,18 @@ def plot_surf_single(
     if subplot is not None:
         plotter.subplot(subplot[0], subplot[1])
 
-    _apply_camera_headlight(plotter)
-
-    mesh, n_verts = _load_surface(surf)
-    vertex_data, roi_labels = _prepare_vertex_scalars(data, rois, n_verts)
-
-    # Base mesh + optional scalars
-    show_scalar_bar = bool(cbar and vertex_data is not None)
-    sb_args = {**_default_scalar_bar_args(), **(scalar_bar_args or {})} if show_scalar_bar else {}
-
-    if vertex_data is None:
-        plotter.add_mesh(
-            mesh,
-            color="lightgrey",
-            smooth_shading=True,
-            show_edges=mesh_edges,
-            edge_color="black",
-            line_width=0.5,
-            ambient=0.01,
-            diffuse=1,
-            specular=0.1,
-            roughness=1e-6,
-        )
-    else:
-        mesh = mesh.copy(deep=False)
-        mesh.point_data["scalars"] = vertex_data
-        actor = plotter.add_mesh(
-            mesh,
-            scalars="scalars",
-            cmap=cmap,
-            nan_color="lightgrey",
-            smooth_shading=True,
-            show_edges=mesh_edges,
-            edge_color="black",
-            line_width=0.5,
-            # Scalar bars are handled manually below to avoid overwriting across subplots.
-            show_scalar_bar=False,
-            ambient=0.01,
-            diffuse=1,
-            specular=0.1,
-            roughness=1e-6,
-        )
-
-        if show_scalar_bar:
-            # PyVista keys scalar bars by their title, and repeated titles overwrite.
-            # Give each subplot renderer a unique internal key while keeping the
-            # displayed title blank unless the user provided one.
-            user_title = None
-            if "title" in sb_args:
-                user_title = sb_args.get("title")
-                sb_args = {k: v for k, v in sb_args.items() if k != "title"}
-
-            renderer_idx = getattr(getattr(plotter, "renderers", None), "active_index", 0)
-            internal_title = f"cbar-{renderer_idx}"
-            scalar_bar = plotter.add_scalar_bar(title=internal_title, mapper=actor.mapper, **sb_args)
-            if user_title is None:
-                scalar_bar.SetTitle("")
-            else:
-                scalar_bar.SetTitle(str(user_title))
-
-    # ROI outlines
-    if roi_outlines and roi_labels is not None:
-        xe, ye, ze = compute_roi_midline_edges(mesh.points, mesh.faces.reshape(-1, 4)[:, 1:], roi_labels)
-        outline_poly = _polydata_from_nan_separated_segments(pv, xe, ye, ze)
-        if outline_poly.n_points:
-            plotter.add_mesh(outline_poly, color="black", line_width=1.7)
+    _add_surface_to_plotter(
+        plotter,
+        surf=surf,
+        data=data,
+        rois=rois,
+        cbar=cbar,
+        cmap=cmap,
+        mesh_edges=mesh_edges,
+        roi_outlines=roi_outlines,
+        scalar_bar_args=scalar_bar_args,
+        clim=clim,
+    )
 
     plotter.hide_axes()
     _finalize_camera(plotter, view=view, zoom=zoom)
@@ -456,6 +553,7 @@ def plot_surf(
     *,
     ax: Optional[Axes] = None,
     scale: float = 1.0,
+    clim: Optional[Tuple[float, float]] = None,
     scalar_bar_args: Optional[Dict[str, Any]] = None,
 ) -> Optional[Any]:
     """Plot surface data across hemispheres, views, and (optionally) multiple maps.
@@ -552,6 +650,7 @@ def plot_surf(
                     cmap=cmap,
                     mesh_edges=mesh_edges,
                     roi_outlines=roi_outlines,
+                    clim=clim,
                     scalar_bar_args=scalar_bar_args,
                 )
 
@@ -564,6 +663,139 @@ def plot_surf(
         return None
 
     return plotter
+
+
+def plot_surf_video(
+    surf: Any,
+    data_timeseries: np.ndarray,
+    *,
+    rois: Optional[np.ndarray] = None,
+    filename: Union[str, Path] = "brain_animation.mp4",
+    framerate: int = 10,
+    view: str = "lateral",
+    zoom: float = 1.0,
+    size: Tuple[int, int] = (800, 608),
+    cmap: Union[str, Any] = "plasma",
+    mesh_edges: bool = False,
+    roi_outlines: bool = False,
+    cbar: bool = False,
+    clim: Optional[Tuple[float, float]] = None,
+    title_template: Optional[str] = "Time: {:.1f} ms",
+    scalar_bar_args: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Create an MP4 video of surface activity over time using PyVista.
+
+    Notes
+    -----
+    MP4 output via `pyvista.Plotter.open_movie` typically requires `ffmpeg`.
+
+    Parameters
+    ----------
+    surf
+        Surface input accepted by `plot_surf_single`.
+    data_timeseries
+        2D array of shape (n_verts, n_frames). If `rois` is provided, ROI-wise shape
+        (n_rois, n_frames) is also accepted.
+    rois
+        Optional ROI/medial-wall labels (shape (n_verts,)). Vertices with label 0 are masked.
+    filename
+        Output video filename.
+    framerate
+        Frames per second.
+    clim
+        Fixed color limits (vmin, vmax). If None, uses symmetric global limits across frames.
+    title_template
+        Optional per-frame title template formatted with time in ms.
+
+    Returns
+    -------
+    str
+        Path to the created video file.
+    """
+
+    if framerate <= 0:
+        raise ValueError("`framerate` must be > 0.")
+
+    _, n_verts = _load_surface(surf)
+    vertex_ts, _ = _prepare_timeseries_scalars(data_timeseries, rois=rois, n_verts=n_verts)
+    n_frames = vertex_ts.shape[1]
+    if n_frames == 0:
+        raise ValueError("`data_timeseries` must have at least one frame.")
+
+    if clim is None:
+        abs_max = float(np.nanmax(np.abs(vertex_ts)))
+        if not np.isfinite(abs_max) or abs_max == 0:
+            clim_use: Tuple[float, float] = (-1.0, 1.0)
+        else:
+            clim_use = (-abs_max, abs_max)
+    else:
+        validated = _validate_clim(clim)
+        assert validated is not None
+        clim_use = validated
+
+    out_path = str(filename)
+
+    plotter = pv.Plotter(off_screen=True, window_size=size, border=False)
+    try:
+        surface_mesh, actor, _ = _add_surface_to_plotter(
+            plotter,
+            surf=surf,
+            data=vertex_ts[:, 0],
+            rois=rois,
+            cbar=cbar,
+            cmap=cmap,
+            mesh_edges=mesh_edges,
+            roi_outlines=roi_outlines,
+            scalar_bar_args=scalar_bar_args,
+            clim=clim_use,
+        )
+
+        plotter.hide_axes()
+        _finalize_camera(plotter, view=view, zoom=zoom)
+
+        if "scalars" not in surface_mesh.point_data:
+            raise RuntimeError("Internal error: expected 'scalars' point_data on the rendered mesh.")
+
+        scalars_arr = surface_mesh.point_data["scalars"]
+
+        try:
+            plotter.open_movie(out_path, framerate=int(framerate))
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to open movie writer. PyVista typically requires ffmpeg for MP4 output; "
+                "install ffmpeg and retry."
+            ) from e
+
+        plotter.show(auto_close=False)
+
+        for frame_idx in range(n_frames):
+            scalars_arr[:] = vertex_ts[:, frame_idx]
+
+            if actor is not None:
+                try:
+                    actor.mapper.scalar_range = clim_use
+                except Exception:
+                    pass
+
+            if title_template:
+                time_ms = frame_idx * (1000.0 / float(framerate))
+                try:
+                    plotter.remove_actor("time_text")
+                except Exception:
+                    pass
+                plotter.add_text(
+                    title_template.format(time_ms),
+                    position="upper_left",
+                    font_size=16,
+                    name="time_text",
+                )
+
+            plotter.write_frame()
+
+    finally:
+        plotter.close()
+
+    return out_path
 
 
 def compute_roi_midline_edges(verts: np.ndarray, faces: np.ndarray, labeling: np.ndarray, verbose: bool = False):
