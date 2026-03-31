@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
-import matplotlib.pyplot as plt
 import pyvista as pv
 
 if TYPE_CHECKING:
@@ -95,14 +94,14 @@ def _as_pathlike(obj: Any) -> Optional[Path]:
     return None
 
 
-def _try_read_surf_neuromodes(surf: Any) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """Try to load a surface via neuromodes.io.read_surf.
+def _try_read_surf_nsbutils(surf: Any) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Try to load a surface via nsbutils.io.read_surf.
 
-    Returns (verts, faces) or None if neuromodes is unavailable or fails.
+    Returns (verts, faces) or None if nsbutils is unavailable or fails.
     """
 
     try:
-        from neuromodes.io import read_surf  # type: ignore
+        from nsbutils.io import read_surf  # type: ignore
     except Exception:
         return None
 
@@ -145,7 +144,7 @@ def _load_surface(surf: Any) -> Tuple[Any, int]:
     # Try neuromodes first for known gifti-like extensions
     path = _as_pathlike(surf)
     if path is not None and path.suffix.lower() == ".gii":
-        nm = _try_read_surf_neuromodes(surf)
+        nm = _try_read_surf_nsbutils(surf)
         if nm is not None:
             verts, faces = nm
             poly = _polydata_from_verts_faces(pv, verts, faces)
@@ -159,7 +158,7 @@ def _load_surface(surf: Any) -> Tuple[Any, int]:
             poly = poly.extract_surface().triangulate()
             return poly, poly.n_points
         except Exception:
-            nm = _try_read_surf_neuromodes(surf)
+            nm = _try_read_surf_nsbutils(surf)
             if nm is not None:
                 verts, faces = nm
                 poly = _polydata_from_verts_faces(pv, verts, faces)
@@ -167,7 +166,7 @@ def _load_surface(surf: Any) -> Tuple[Any, int]:
             raise
 
     # Fallback: try neuromodes for non-path objects (GiftiImage, lapy mesh, etc.)
-    nm = _try_read_surf_neuromodes(surf)
+    nm = _try_read_surf_nsbutils(surf)
     if nm is not None:
         verts, faces = nm
         poly = _polydata_from_verts_faces(pv, verts, faces)

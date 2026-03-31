@@ -5,8 +5,8 @@ description = "Neuroimaging tools developed by the Neural Systems and Behaviour 
 readme = "README.rst"
 requires-python = ">=3.10"
 dependencies = [
+    "lapy>=1.6.0",
     "matplotlib>=3.9.4",
-    "neuromodes @ git+https://github.com/NSBLab/neuromodes.git@refs/pull/15/head",
     "numpy>=2.0.2",
     "scipy>=1.13.1",
     "surfplot>=0.2.0",

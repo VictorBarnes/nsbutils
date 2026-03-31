@@ -1572,19 +1572,6 @@ wheels = [
 ]
 
 [[package]]
-name = "neuromodes"
-version = "0.1.0"
-source = { git = "https://github.com/NSBLab/neuromodes.git?rev=refs%2Fpull%2F15%2Fhead#24bb6acbef5c410c6a13f00d9a19801832c13d5f" }
-dependencies = [
-    { name = "lapy" },
-    { name = "nibabel" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.16.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-]
-
-[[package]]
 name = "nibabel"
 version = "5.3.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1605,8 +1592,8 @@ name = "nsbutils"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "lapy" },
     { name = "matplotlib" },
-    { name = "neuromodes" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1638,9 +1625,9 @@ requires-dist = [
     { name = "imageio-ffmpeg", marker = "extra == 'plotting'", specifier = ">=0.6.0" },
     { name = "ipykernel", marker = "extra == 'tutorials'", specifier = ">=6.31.0" },
     { name = "ipywidgets", marker = "extra == 'plotting'", specifier = ">=8.1.8" },
+    { name = "lapy", specifier = ">=1.6.0" },
     { name = "matplotlib", specifier = ">=3.9.4" },
     { name = "nest-asyncio2", marker = "extra == 'plotting'", specifier = ">=1.7.2" },
-    { name = "neuromodes", git = "https://github.com/NSBLab/neuromodes.git?rev=refs%2Fpull%2F15%2Fhead" },
     { name = "numpy", specifier = ">=2.0.2" },
     { name = "pytest", marker = "extra == 'testing'", specifier = ">=8.4.2" },
     { name = "pyvista", marker = "extra == 'plotting'", specifier = ">=0.46.5" },
