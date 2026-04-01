@@ -28,6 +28,7 @@ plotting = [
 ]
 tutorials = [
     "ipykernel>=6.31.0",
+    "neuromodes @ git+https://github.com/NSBLab/neuromodes.git@dev",
 ]
 
 [build-system]

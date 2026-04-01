@@ -1212,8 +1212,8 @@ wheels = [
 
 [[package]]
 name = "lapy"
-version = "1.6.0"
-source = { registry = "https://pypi.org/simple" }
+version = "1.7.0.dev0"
+source = { git = "https://github.com/Deep-MI/LaPy.git?rev=main#380e632781c2be04f06fe2ae08005b988c472699" }
 dependencies = [
     { name = "nibabel" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1222,10 +1222,6 @@ dependencies = [
     { name = "psutil" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.16.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/dd/95/361169d744172dd4c289bcb1d910c85294e159b3f8caae532f823e93f66e/lapy-1.6.0.tar.gz", hash = "sha256:b29c5a1ded33ff507f01378f4dd70525d13f8b5d3219bb44d2e3ff981bbfaac0", size = 84831, upload-time = "2026-03-16T13:08:05.633Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/29/7c/f74fe3536f980cebb6c117395e728ecea4711415e51898b373df78441ba0/lapy-1.6.0-py3-none-any.whl", hash = "sha256:94d0c965425abcc110a773fb51822d7a4d7123d27fbd625c0890f34c92148ecf", size = 90568, upload-time = "2026-03-16T13:08:04.319Z" },
 ]
 
 [[package]]
@@ -1572,6 +1568,21 @@ wheels = [
 ]
 
 [[package]]
+name = "neuromodes"
+version = "0.1.0"
+source = { git = "https://github.com/NSBLab/neuromodes.git?rev=dev#fc2997d16371c487452e54632b19bf342cdebced" }
+dependencies = [
+    { name = "joblib" },
+    { name = "lapy" },
+    { name = "nibabel" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.16.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "trimesh" },
+]
+
+[[package]]
 name = "nibabel"
 version = "5.3.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1617,6 +1628,7 @@ testing = [
 ]
 tutorials = [
     { name = "ipykernel" },
+    { name = "neuromodes" },
 ]
 
 [package.metadata]
@@ -1628,6 +1640,7 @@ requires-dist = [
     { name = "lapy", specifier = ">=1.6.0" },
     { name = "matplotlib", specifier = ">=3.9.4" },
     { name = "nest-asyncio2", marker = "extra == 'plotting'", specifier = ">=1.7.2" },
+    { name = "neuromodes", marker = "extra == 'tutorials'", git = "https://github.com/NSBLab/neuromodes.git?rev=dev" },
     { name = "numpy", specifier = ">=2.0.2" },
     { name = "pytest", marker = "extra == 'testing'", specifier = ">=8.4.2" },
     { name = "pyvista", marker = "extra == 'plotting'", specifier = ">=0.46.5" },
@@ -2902,6 +2915,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/91/15/f45c0b63a1fb5696c531dbd43e8b698225b43c0a71939ee5165581e3f217/trame_vuetify-3.2.1.tar.gz", hash = "sha256:1578904a8fc5313ba8033076ea2d9338a050a26c68ceebb207fb6b15e18c0a45", size = 5107294, upload-time = "2026-02-02T17:07:59.366Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ec/73/08e61712de488fddca38bced13968f2c0fc74bc16e1034c21254246e8528/trame_vuetify-3.2.1-py3-none-any.whl", hash = "sha256:45239b9972bcfb8f121487efe7f537c0dc44174a87535bbd2131a9c86e4053bf", size = 5134606, upload-time = "2026-02-02T17:07:57.609Z" },
+]
+
+[[package]]
+name = "trimesh"
+version = "4.11.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0d/bf/53b69f3b6708c20ceb4d1d1250c7dc205733eb646659e5e55771f76ffabd/trimesh-4.11.5.tar.gz", hash = "sha256:b90e6cdd6ada51c52d4a7d32947f4ce44b6751c5b7cab2b04e271ecea1e397d3", size = 836449, upload-time = "2026-03-25T01:08:24.216Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/83/72e812f772daee66651f468c7b2535fa05eac27db26df7e614cae823c832/trimesh-4.11.5-py3-none-any.whl", hash = "sha256:b225a94c8af79569f7167ca7eaaab4fd05c260da58a075599453d655835258ef", size = 740833, upload-time = "2026-03-25T01:08:21.397Z" },
 ]
 
 [[package]]

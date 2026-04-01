@@ -26,15 +26,172 @@ _DEFAULT_PANEL_SIZE: Tuple[int, int] = (400, 300)  # (width, height) in pixels
 def _validate_clim(clim: Optional[Tuple[float, float]]) -> Optional[Tuple[float, float]]:
     if clim is None:
         return None
-    if not isinstance(clim, (tuple, list)) or len(clim) != 2:
-        raise ValueError("`clim` must be a (vmin, vmax) tuple.")
-    vmin = float(clim[0])
-    vmax = float(clim[1])
+    try:
+        arr = np.asarray(clim, dtype=float)
+    except Exception as e:
+        raise ValueError("`clim` must be a (vmin, vmax) pair.") from e
+    if arr.ndim != 1 or arr.size != 2:
+        raise ValueError("`clim` must be a (vmin, vmax) pair.")
+    vmin = float(arr[0])
+    vmax = float(arr[1])
     if not (np.isfinite(vmin) and np.isfinite(vmax)):
         raise ValueError("`clim` values must be finite.")
     if not (vmin < vmax):
         raise ValueError("`clim` must satisfy vmin < vmax.")
     return vmin, vmax
+
+
+def _normalize_maps_clim(
+    clim: Any,
+    *,
+    n_maps: int,
+) -> Union[None, Tuple[float, float], np.ndarray]:
+    """Normalize `clim` for `plot_surf`.
+
+    Accepts:
+    - None: pass through (PyVista chooses range per mesh)
+    - (vmin, vmax): fixed limits for all maps
+    - array-like of shape (n_maps, 2): per-map limits
+
+    Returns:
+    - None
+    - (vmin, vmax)
+    - ndarray of shape (n_maps, 2)
+    """
+
+    if clim is None:
+        return None
+
+    if n_maps <= 0:
+        raise ValueError("`n_maps` must be > 0.")
+
+    def _expand_if_degenerate(vmin: float, vmax: float) -> Tuple[float, float]:
+        if vmin < vmax:
+            return vmin, vmax
+        if vmin != vmax:
+            return vmin, vmax
+        eps = max(1e-6, abs(vmin) * 1e-3)
+        return vmin - eps, vmax + eps
+
+    arr = np.asarray(clim, dtype=float)
+
+    # Fixed (vmin, vmax)
+    if arr.ndim == 1 and arr.size == 2:
+        vmin, vmax = float(arr[0]), float(arr[1])
+        vmin, vmax = _expand_if_degenerate(vmin, vmax)
+        validated = _validate_clim((vmin, vmax))
+        assert validated is not None
+        return validated
+
+    # Per-map (n_maps, 2)
+    if arr.ndim == 2 and arr.shape == (n_maps, 2):
+        out = np.empty((n_maps, 2), dtype=float)
+        for idx in range(n_maps):
+            vmin = float(arr[idx, 0])
+            vmax = float(arr[idx, 1])
+
+            vmin_finite = np.isfinite(vmin)
+            vmax_finite = np.isfinite(vmax)
+            if vmin_finite and vmax_finite:
+                vmin, vmax = _expand_if_degenerate(vmin, vmax)
+                validated = _validate_clim((vmin, vmax))
+                assert validated is not None
+                out[idx, 0], out[idx, 1] = validated
+                continue
+
+            if (not vmin_finite) and (not vmax_finite):
+                out[idx, 0], out[idx, 1] = (-1.0, 1.0)
+                continue
+
+            raise ValueError(
+                "Per-map `clim` must contain finite (vmin, vmax) pairs for each map; "
+                "got a partially non-finite row."
+            )
+        return out
+
+    raise ValueError("`clim` must be None, a (vmin, vmax) pair, or an array of shape (n_maps, 2).")
+
+
+def _normalize_video_clim(
+    clim: Any,
+    *,
+    n_frames: int,
+    vertex_ts: np.ndarray,
+) -> Union[Tuple[float, float], np.ndarray]:
+    """Normalize `clim` for `plot_surf_video`.
+
+    Accepts:
+    - None: automatic global symmetric limits across all frames (current behavior)
+    - (vmin, vmax): fixed limits across all frames
+    - array-like of shape (n_frames, 2): per-frame limits
+
+    Returns either a single (vmin, vmax) tuple, or a float array of shape (n_frames, 2).
+    """
+
+    if n_frames <= 0:
+        raise ValueError("`n_frames` must be > 0.")
+
+    def _expand_if_degenerate(vmin: float, vmax: float) -> Tuple[float, float]:
+        if vmin < vmax:
+            return vmin, vmax
+        if vmin != vmax:
+            # Covers vmin > vmax; let _validate_clim raise with a clearer error.
+            return vmin, vmax
+        eps = max(1e-6, abs(vmin) * 1e-3)
+        return vmin - eps, vmax + eps
+
+    if clim is None:
+        abs_max = float(np.nanmax(np.abs(vertex_ts)))
+        if not np.isfinite(abs_max) or abs_max == 0:
+            clim_use: Tuple[float, float] = (-1.0, 1.0)
+        else:
+            clim_use = (-abs_max, abs_max)
+        validated = _validate_clim(clim_use)
+        assert validated is not None
+        return validated
+
+    arr = np.asarray(clim, dtype=float)
+
+    # Fixed (vmin, vmax)
+    if arr.ndim == 1 and arr.size == 2:
+        vmin = float(arr[0])
+        vmax = float(arr[1])
+        vmin, vmax = _expand_if_degenerate(vmin, vmax)
+        validated = _validate_clim((vmin, vmax))
+        assert validated is not None
+        return validated
+
+    # Per-frame (n_frames, 2)
+    if arr.ndim == 2 and arr.shape == (n_frames, 2):
+        out = np.empty((n_frames, 2), dtype=float)
+        for idx in range(n_frames):
+            vmin = float(arr[idx, 0])
+            vmax = float(arr[idx, 1])
+
+            vmin_finite = np.isfinite(vmin)
+            vmax_finite = np.isfinite(vmax)
+            if vmin_finite and vmax_finite:
+                vmin, vmax = _expand_if_degenerate(vmin, vmax)
+                validated = _validate_clim((vmin, vmax))
+                assert validated is not None
+                out[idx, 0], out[idx, 1] = validated
+                continue
+
+            # Allow all-NaN/all-nonfinite rows as a convenience (e.g., frame has no data).
+            if (not vmin_finite) and (not vmax_finite):
+                out[idx, 0], out[idx, 1] = (-1.0, 1.0)
+                continue
+
+            raise ValueError(
+                "Per-frame `clim` must contain finite (vmin, vmax) pairs for each frame; "
+                "got a partially non-finite row."
+            )
+
+        return out
+
+    raise ValueError(
+        "`clim` must be None, a (vmin, vmax) pair, or an array of shape (n_frames, 2)."
+    )
 
 
 @dataclass(frozen=True)
@@ -467,7 +624,7 @@ def plot_surf_single(
     *,
     ax: Optional[Axes] = None,
     scale: float = 1.0,
-    clim: Optional[Tuple[float, float]] = None,
+    clim: Optional[Union[Tuple[float, float], np.ndarray]] = None,
     scalar_bar_args: Optional[Dict[str, Any]] = None,
 ) -> Optional[Any]:
     """Render a single surface into a PyVista subplot or embed into a Matplotlib axis.
@@ -552,13 +709,19 @@ def plot_surf(
     *,
     ax: Optional[Axes] = None,
     scale: float = 1.0,
-    clim: Optional[Tuple[float, float]] = None,
+    clim: Optional[Union[Tuple[float, float], np.ndarray]] = None,
     scalar_bar_args: Optional[Dict[str, Any]] = None,
 ) -> Optional[Any]:
     """Plot surface data across hemispheres, views, and (optionally) multiple maps.
 
-    Mirrors the Plotly API you provided, but returns a `pyvista.Plotter` when `ax is None`.
-    If `ax` is provided, renders off-screen and embeds a rasterized image.
+    Parameters
+    ----------
+    clim
+        Color limits. Accepted forms:
+
+        - None: let PyVista choose limits per mesh (default)
+        - (vmin, vmax): fixed limits applied to every map
+        - array-like of shape (n_maps, 2): per-map limits, one (vmin, vmax) pair per map
     """
 
     hemis = list(surf.keys())
@@ -582,6 +745,14 @@ def plot_surf(
             if data2[hemi].shape[1] != n_maps:
                 raise ValueError("All hemispheres must have the same number of maps.")
         data = data2
+
+    clim_norm = _normalize_maps_clim(clim, n_maps=n_maps)
+    clim_fixed: Optional[Tuple[float, float]] = None
+    clim_per_map: Optional[np.ndarray] = None
+    if isinstance(clim_norm, tuple):
+        clim_fixed = clim_norm
+    elif isinstance(clim_norm, np.ndarray):
+        clim_per_map = clim_norm
 
     # Individual block size (hemis × views) for a single map
     if layout_indiv == "row":
@@ -616,6 +787,12 @@ def plot_surf(
     reverse_rh_view_order = mirror_rh and (layout_indiv in ("row", "col"))
 
     for map_idx in range(n_maps):
+        clim_use = (
+            clim_fixed
+            if clim_fixed is not None
+            else (None if clim_per_map is None else (float(clim_per_map[map_idx, 0]), float(clim_per_map[map_idx, 1])))
+        )
+
         if layout_group == "row":
             row_offset, col_offset = 0, map_idx * indiv_cols
         else:
@@ -649,7 +826,7 @@ def plot_surf(
                     cmap=cmap,
                     mesh_edges=mesh_edges,
                     roi_outlines=roi_outlines,
-                    clim=clim,
+                    clim=clim_use,
                     scalar_bar_args=scalar_bar_args,
                 )
 
@@ -678,7 +855,7 @@ def plot_surf_video(
     mesh_edges: bool = False,
     roi_outlines: bool = False,
     cbar: bool = False,
-    clim: Optional[Tuple[float, float]] = None,
+    clim: Optional[Union[Tuple[float, float], np.ndarray]] = None,
     title_template: Optional[str] = "Time: {:.1f} ms",
     scalar_bar_args: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -702,7 +879,14 @@ def plot_surf_video(
     framerate
         Frames per second.
     clim
-        Fixed color limits (vmin, vmax). If None, uses symmetric global limits across frames.
+        Color limits. Accepted forms:
+
+        - None: uses symmetric global limits across all frames (default)
+        - (vmin, vmax): fixed limits across all frames
+        - array-like of shape (n_frames, 2): per-frame limits, one (vmin, vmax) pair per frame
+
+        When using per-frame limits, the color scale (and scalar bar, if enabled) will change
+        over time.
     title_template
         Optional per-frame title template formatted with time in ms.
 
@@ -721,16 +905,17 @@ def plot_surf_video(
     if n_frames == 0:
         raise ValueError("`data_timeseries` must have at least one frame.")
 
-    if clim is None:
-        abs_max = float(np.nanmax(np.abs(vertex_ts)))
-        if not np.isfinite(abs_max) or abs_max == 0:
-            clim_use: Tuple[float, float] = (-1.0, 1.0)
-        else:
-            clim_use = (-abs_max, abs_max)
+    clim_norm = _normalize_video_clim(clim, n_frames=n_frames, vertex_ts=vertex_ts)
+    clim_fixed: Optional[Tuple[float, float]]
+    clim_per_frame: Optional[np.ndarray]
+    if isinstance(clim_norm, tuple):
+        clim_fixed = clim_norm
+        clim_per_frame = None
+        clim_first = clim_fixed
     else:
-        validated = _validate_clim(clim)
-        assert validated is not None
-        clim_use = validated
+        clim_fixed = None
+        clim_per_frame = clim_norm
+        clim_first = (float(clim_per_frame[0, 0]), float(clim_per_frame[0, 1]))
 
     out_path = str(filename)
 
@@ -746,7 +931,7 @@ def plot_surf_video(
             mesh_edges=mesh_edges,
             roi_outlines=roi_outlines,
             scalar_bar_args=scalar_bar_args,
-            clim=clim_use,
+            clim=clim_first,
         )
 
         plotter.hide_axes()
@@ -770,9 +955,21 @@ def plot_surf_video(
         for frame_idx in range(n_frames):
             scalars_arr[:] = vertex_ts[:, frame_idx]
 
+            clim_use = (
+                clim_fixed
+                if clim_fixed is not None
+                else (float(clim_per_frame[frame_idx, 0]), float(clim_per_frame[frame_idx, 1]))
+            )
+
             if actor is not None:
                 try:
                     actor.mapper.scalar_range = clim_use
+                except Exception:
+                    pass
+
+            if cbar:
+                try:
+                    plotter.update_scalar_bar_range(clim_use)
                 except Exception:
                     pass
 
@@ -798,11 +995,41 @@ def plot_surf_video(
 
 
 def compute_roi_midline_edges(verts: np.ndarray, faces: np.ndarray, labeling: np.ndarray, verbose: bool = False):
-    """Compute ROI boundaries using midpoints between label boundaries.
+    """
+    Compute ROI boundary line segments on a triangular mesh. The boundary is approximated 
+    within each triangle using midpoints of edges whose incident vertices belong to 
+    different ROI labels.
 
-    Matches MATLAB findROIboundaries.m behavior, including medial wall borders.
+    Parameters
+    ----------
+    verts : array_like 
+        Vertex coordinates of shape (n_vertices, 3).
+    faces : array_like
+        Triangle indices into ``verts`` of shape (n_faces, 3).
+    labeling : array_like 
+        Integer ROI label per vertex of shape (n_vertices,). ``0`` is treated as 
+        background/mask (e.g., medial wall). NaNs are converted to 0.
+    verbose : bool, optional
+        If True, print a message when no boundaries are found.
 
-    This function is copied from the Plotly implementation and is backend-agnostic.
+    Returns
+    -------
+    xe, ye, ze : np.ndarray
+        1D float arrays of equal length encoding the polyline(s) for Plotly
+        ``Scatter3d``. Each line segment is represented by two points followed by
+        a ``np.nan`` separator (i.e., ``[x0, x1, nan, x0, x1, nan, ...]``).
+        If no boundaries are found, all three arrays are empty.
+
+    Notes
+    -----
+    - If a triangle contains exactly two unique labels (including the common case
+      ``{0, X}`` for medial-wall vs ROI), two of its edges will cross a label
+      boundary; the function adds a segment connecting the midpoints of those two
+      edges.
+    - If a triangle contains three unique labels, the function treats it as a
+      three-way junction and adds three segments from the triangle centroid to
+      the midpoint of each edge.
+
     """
 
     labeling = np.asarray(labeling)

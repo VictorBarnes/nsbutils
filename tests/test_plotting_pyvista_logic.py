@@ -2,6 +2,8 @@ import numpy as np
 import pytest
 
 from nsbutils.plotting_pyvista import (
+    _normalize_maps_clim,
+    _normalize_video_clim,
     _prepare_timeseries_scalars,
     _prepare_vertex_scalars,
     _rh_view_swap,
@@ -59,6 +61,10 @@ def test_validate_clim_accepts_tuple():
     assert _validate_clim((-1, 1)) == (-1.0, 1.0)
 
 
+def test_validate_clim_accepts_numpy_array():
+    assert _validate_clim(np.array([-1, 1])) == (-1.0, 1.0)
+
+
 @pytest.mark.parametrize("clim", [(1, 1), (2, -1), (np.nan, 1), (0, np.inf)])
 def test_validate_clim_raises_on_invalid(clim):
     with pytest.raises(ValueError):
@@ -93,3 +99,96 @@ def test_prepare_timeseries_scalars_roiwise_expands():
     assert np.all(np.isnan(vts[0, :]))
     assert np.allclose(vts[1:3, :], ts_roi[0, :])
     assert np.allclose(vts[3:5, :], ts_roi[1, :])
+
+
+def test_normalize_video_clim_none_uses_global_symmetric():
+    # vertex_ts: (n_verts, n_frames)
+    vertex_ts = np.array(
+        [
+            [-2.0, 1.0],
+            [3.0, -4.0],
+        ]
+    )
+    clim = _normalize_video_clim(None, n_frames=2, vertex_ts=vertex_ts)
+    assert clim == (-4.0, 4.0)
+
+
+def test_normalize_video_clim_tuple_is_fixed():
+    vertex_ts = np.zeros((3, 4), dtype=float)
+    clim = _normalize_video_clim((-1, 2), n_frames=4, vertex_ts=vertex_ts)
+    assert clim == (-1.0, 2.0)
+
+
+def test_normalize_video_clim_per_frame_array_validates():
+    vertex_ts = np.zeros((2, 3), dtype=float)
+    clim_in = np.array(
+        [
+            [-1.0, 1.0],
+            [0.0, 2.0],
+            [-2.0, 3.0],
+        ]
+    )
+    clim = _normalize_video_clim(clim_in, n_frames=3, vertex_ts=vertex_ts)
+    assert isinstance(clim, np.ndarray)
+    assert clim.shape == (3, 2)
+    assert np.allclose(clim, clim_in)
+
+
+def test_normalize_video_clim_per_frame_shape_mismatch_raises():
+    vertex_ts = np.zeros((2, 3), dtype=float)
+    clim_in = np.array([[-1.0, 1.0], [0.0, 2.0]])
+    with pytest.raises(ValueError):
+        _normalize_video_clim(clim_in, n_frames=3, vertex_ts=vertex_ts)
+
+
+def test_normalize_video_clim_degenerate_row_expands_and_nan_row_falls_back():
+    vertex_ts = np.zeros((2, 2), dtype=float)
+    clim_in = np.array(
+        [
+            [1.0, 1.0],
+            [np.nan, np.nan],
+        ]
+    )
+    clim = _normalize_video_clim(clim_in, n_frames=2, vertex_ts=vertex_ts)
+    assert isinstance(clim, np.ndarray)
+    assert clim.shape == (2, 2)
+    assert clim[0, 0] < clim[0, 1]
+    assert np.allclose(clim[1], [-1.0, 1.0])
+
+
+def test_normalize_video_clim_partially_nonfinite_row_raises():
+    vertex_ts = np.zeros((2, 1), dtype=float)
+    clim_in = np.array([[np.nan, 1.0]])
+    with pytest.raises(ValueError):
+        _normalize_video_clim(clim_in, n_frames=1, vertex_ts=vertex_ts)
+
+
+def test_normalize_maps_clim_none_passthrough():
+    assert _normalize_maps_clim(None, n_maps=2) is None
+
+
+def test_normalize_maps_clim_fixed_pair():
+    clim = _normalize_maps_clim((-2, 3), n_maps=4)
+    assert clim == (-2.0, 3.0)
+
+
+def test_normalize_maps_clim_per_map_array():
+    clim_in = np.array([[-1, 1], [0, 2], [-2, 5]], dtype=float)
+    clim = _normalize_maps_clim(clim_in, n_maps=3)
+    assert isinstance(clim, np.ndarray)
+    assert clim.shape == (3, 2)
+    assert np.allclose(clim, clim_in)
+
+
+def test_normalize_maps_clim_shape_mismatch_raises():
+    clim_in = np.array([[-1, 1], [0, 2]], dtype=float)
+    with pytest.raises(ValueError):
+        _normalize_maps_clim(clim_in, n_maps=3)
+
+
+def test_normalize_maps_clim_degenerate_row_expands():
+    clim_in = np.array([[1.0, 1.0]], dtype=float)
+    clim = _normalize_maps_clim(clim_in, n_maps=1)
+    assert isinstance(clim, np.ndarray)
+    assert clim.shape == (1, 2)
+    assert clim[0, 0] < clim[0, 1]
