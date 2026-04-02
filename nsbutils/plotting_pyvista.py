@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Union, TYPE_CHECKING
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
 import pyvista as pv
@@ -116,20 +116,27 @@ def _normalize_video_clim(
     clim: Any,
     *,
     n_frames: int,
+    n_maps: int = 1,
     vertex_ts: np.ndarray,
 ) -> Union[Tuple[float, float], np.ndarray]:
     """Normalize `clim` for `plot_surf_video`.
 
     Accepts:
     - None: automatic global symmetric limits across all frames (current behavior)
-    - (vmin, vmax): fixed limits across all frames
-    - array-like of shape (n_frames, 2): per-frame limits
+    - (vmin, vmax): fixed limits across all frames (and maps)
+    - array-like of shape (n_frames, 2): per-frame limits (broadcast across maps)
+    - array-like of shape (n_maps, 2): per-map limits (broadcast across frames)
+    - array-like of shape (n_frames, n_maps, 2): per-frame per-map limits
 
-    Returns either a single (vmin, vmax) tuple, or a float array of shape (n_frames, 2).
+    Returns:
+    - If n_maps == 1: either a single (vmin, vmax) tuple, or a float array of shape (n_frames, 2).
+    - If n_maps > 1: a float array of shape (n_frames, n_maps, 2).
     """
 
     if n_frames <= 0:
         raise ValueError("`n_frames` must be > 0.")
+    if n_maps <= 0:
+        raise ValueError("`n_maps` must be > 0.")
 
     def _expand_if_degenerate(vmin: float, vmax: float) -> Tuple[float, float]:
         if vmin < vmax:
@@ -140,6 +147,12 @@ def _normalize_video_clim(
         eps = max(1e-6, abs(vmin) * 1e-3)
         return vmin - eps, vmax + eps
 
+    def _broadcast_fixed(validated: Tuple[float, float]) -> Union[Tuple[float, float], np.ndarray]:
+        if n_maps == 1:
+            return validated
+        base = np.asarray(validated, dtype=float).reshape(1, 1, 2)
+        return np.broadcast_to(base, (n_frames, n_maps, 2)).copy()
+
     if clim is None:
         abs_max = float(np.nanmax(np.abs(vertex_ts)))
         if not np.isfinite(abs_max) or abs_max == 0:
@@ -148,7 +161,7 @@ def _normalize_video_clim(
             clim_use = (-abs_max, abs_max)
         validated = _validate_clim(clim_use)
         assert validated is not None
-        return validated
+        return _broadcast_fixed(validated)
 
     arr = np.asarray(clim, dtype=float)
 
@@ -159,14 +172,13 @@ def _normalize_video_clim(
         vmin, vmax = _expand_if_degenerate(vmin, vmax)
         validated = _validate_clim((vmin, vmax))
         assert validated is not None
-        return validated
+        return _broadcast_fixed(validated)
 
-    # Per-frame (n_frames, 2)
-    if arr.ndim == 2 and arr.shape == (n_frames, 2):
-        out = np.empty((n_frames, 2), dtype=float)
-        for idx in range(n_frames):
-            vmin = float(arr[idx, 0])
-            vmax = float(arr[idx, 1])
+    def _validate_pairs(pairs_2d: np.ndarray, *, error_prefix: str) -> np.ndarray:
+        out = np.empty_like(pairs_2d, dtype=float)
+        for idx in range(pairs_2d.shape[0]):
+            vmin = float(pairs_2d[idx, 0])
+            vmax = float(pairs_2d[idx, 1])
 
             vmin_finite = np.isfinite(vmin)
             vmax_finite = np.isfinite(vmax)
@@ -177,20 +189,41 @@ def _normalize_video_clim(
                 out[idx, 0], out[idx, 1] = validated
                 continue
 
-            # Allow all-NaN/all-nonfinite rows as a convenience (e.g., frame has no data).
             if (not vmin_finite) and (not vmax_finite):
                 out[idx, 0], out[idx, 1] = (-1.0, 1.0)
                 continue
 
             raise ValueError(
-                "Per-frame `clim` must contain finite (vmin, vmax) pairs for each frame; "
-                "got a partially non-finite row."
+                f"{error_prefix} must contain finite (vmin, vmax) pairs; got a partially non-finite row."
             )
-
         return out
 
+    # Per-frame (n_frames, 2)
+    if arr.ndim == 2 and arr.shape == (n_frames, 2):
+        out = _validate_pairs(arr, error_prefix="Per-frame `clim`")
+        if n_maps == 1:
+            return out
+        return np.broadcast_to(out[:, np.newaxis, :], (n_frames, n_maps, 2)).copy()
+
+    # Per-map (n_maps, 2)
+    if arr.ndim == 2 and arr.shape == (n_maps, 2):
+        out_maps = _validate_pairs(arr, error_prefix="Per-map `clim`")
+        if n_maps == 1:
+            validated = _validate_clim((float(out_maps[0, 0]), float(out_maps[0, 1])))
+            assert validated is not None
+            return validated
+        return np.broadcast_to(out_maps[np.newaxis, :, :], (n_frames, n_maps, 2)).copy()
+
+    # Per-frame per-map (n_frames, n_maps, 2)
+    if arr.ndim == 3 and arr.shape == (n_frames, n_maps, 2):
+        out3 = np.empty((n_frames, n_maps, 2), dtype=float)
+        for f_idx in range(n_frames):
+            out3[f_idx, :, :] = _validate_pairs(arr[f_idx, :, :], error_prefix="Per-frame per-map `clim`")
+        return out3
+
     raise ValueError(
-        "`clim` must be None, a (vmin, vmax) pair, or an array of shape (n_frames, 2)."
+        "`clim` must be None, a (vmin, vmax) pair, or an array of shape (n_frames, 2), (n_maps, 2), "
+        "or (n_frames, n_maps, 2)."
     )
 
 
@@ -298,6 +331,11 @@ def _load_surface(surf: Any) -> Tuple[Any, int]:
         poly = _polydata_from_verts_faces(pv, np.asarray(surf["v"]), np.asarray(surf["t"]))
         return poly, poly.n_points
 
+    # Dict-like `{vertices, faces}` (common nsbutils/tutorial style)
+    if isinstance(surf, Mapping) and "vertices" in surf and "faces" in surf:
+        poly = _polydata_from_verts_faces(pv, np.asarray(surf["vertices"]), np.asarray(surf["faces"]))
+        return poly, poly.n_points
+
     # Try neuromodes first for known gifti-like extensions
     path = _as_pathlike(surf)
     if path is not None and path.suffix.lower() == ".gii":
@@ -331,7 +369,7 @@ def _load_surface(surf: Any) -> Tuple[Any, int]:
 
     raise ValueError(
         "Unsupported `surf` input. Provide a file path, a (verts, faces) tuple, a dict with keys "
-        "{'v','t'}, or an object supported by neuromodes.io.read_surf (if installed)."
+        "{'v','t'} or {'vertices','faces'}, or an object supported by neuromodes.io.read_surf (if installed)."
     )
 
 
@@ -391,8 +429,8 @@ def _prepare_timeseries_scalars(
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """Validate and normalize timeseries scalars.
 
-    Accepts either vertex-wise timeseries (n_verts, n_frames) or ROI-wise timeseries
-    (n_rois, n_frames) when `rois` is provided.
+    Accepts either vertex-wise timeseries (n_verts, n_frames) / (n_verts, n_frames, n_maps)
+    or ROI-wise timeseries (n_rois, n_frames) / (n_rois, n_frames, n_maps) when `rois` is provided.
 
     Returns (vertex_timeseries, roi_labels). If roi_labels is provided, masked
     vertices (roi==0) are set to NaN across all frames.
@@ -407,9 +445,10 @@ def _prepare_timeseries_scalars(
             )
 
     arr = np.asarray(data_timeseries)
-    if arr.ndim != 2:
+    if arr.ndim not in (2, 3):
         raise ValueError(
-            "`data_timeseries` must be a 2D array of shape (n_verts, n_frames) or (n_rois, n_frames)."
+            "`data_timeseries` must be a 2D array (n_verts, n_frames)/(n_rois, n_frames) or a 3D array "
+            "(n_verts, n_frames, n_maps)/(n_rois, n_frames, n_maps)."
         )
 
     if arr.shape[0] == n_verts:
@@ -426,13 +465,15 @@ def _prepare_timeseries_scalars(
             )
 
         n_frames = arr.shape[1]
-        vertex_ts = np.zeros((n_verts, n_frames), dtype=float)
+        n_maps = 1 if arr.ndim == 2 else arr.shape[2]
+        out_shape = (n_verts, n_frames) if arr.ndim == 2 else (n_verts, n_frames, n_maps)
+        vertex_ts = np.zeros(out_shape, dtype=float)
         for roi_id in range(1, n_rois + 1):
-            vertex_ts[roi_labels == roi_id, :] = arr[roi_id - 1, :]
+            vertex_ts[roi_labels == roi_id, ...] = arr[roi_id - 1, ...]
 
     if roi_labels is not None:
         vertex_ts = vertex_ts.copy()
-        vertex_ts[roi_labels == 0, :] = np.nan
+        vertex_ts[roi_labels == 0, ...] = np.nan
 
     return vertex_ts, roi_labels
 
@@ -843,12 +884,15 @@ def plot_surf(
 
 def plot_surf_video(
     surf: Any,
-    data_timeseries: np.ndarray,
+    data_timeseries: Union[np.ndarray, Mapping[str, np.ndarray]],
     *,
-    rois: Optional[np.ndarray] = None,
+    rois: Optional[Union[np.ndarray, Mapping[str, np.ndarray]]] = None,
     filename: Union[str, Path] = "brain_animation.mp4",
     framerate: int = 10,
-    view: str = "lateral",
+    view: Union[str, Sequence[str]] = "lateral",
+    views: Optional[List[str]] = None,
+    layout_indiv: str = "row",
+    layout_group: str = "row",
     zoom: float = 1.0,
     size: Tuple[int, int] = (800, 608),
     cmap: Union[str, Any] = "plasma",
@@ -868,12 +912,19 @@ def plot_surf_video(
     Parameters
     ----------
     surf
-        Surface input accepted by `plot_surf_single`.
+        Either a single surface input accepted by `plot_surf_single`, or a hemisphere mapping
+        (e.g., ``{"lh": <surf>, "rh": <surf>}``) like `plot_surf`.
     data_timeseries
-        2D array of shape (n_verts, n_frames). If `rois` is provided, ROI-wise shape
-        (n_rois, n_frames) is also accepted.
+        For a single surface: a 2D array ``(n_verts, n_frames)`` or a 3D array
+        ``(n_verts, n_frames, n_maps)``.
+
+        If `rois` is provided, ROI-wise variants ``(n_rois, n_frames)`` and
+        ``(n_rois, n_frames, n_maps)`` are also accepted.
+
+        For hemisphere mappings: provide a dict with matching hemisphere keys.
     rois
-        Optional ROI/medial-wall labels (shape (n_verts,)). Vertices with label 0 are masked.
+        Optional ROI/medial-wall labels. For a single surface: array of shape ``(n_verts,)``.
+        For hemisphere mappings: dict of arrays keyed by hemisphere. Vertices with label 0 are masked.
     filename
         Output video filename.
     framerate
@@ -881,11 +932,13 @@ def plot_surf_video(
     clim
         Color limits. Accepted forms:
 
-        - None: uses symmetric global limits across all frames (default)
-        - (vmin, vmax): fixed limits across all frames
-        - array-like of shape (n_frames, 2): per-frame limits, one (vmin, vmax) pair per frame
+        - None: uses symmetric global limits across all frames (and maps) (default)
+        - (vmin, vmax): fixed limits across all frames (and maps)
+        - array-like of shape (n_frames, 2): per-frame limits (broadcast across maps)
+        - array-like of shape (n_maps, 2): per-map limits (broadcast across frames)
+        - array-like of shape (n_frames, n_maps, 2): per-frame per-map limits
 
-        When using per-frame limits, the color scale (and scalar bar, if enabled) will change
+        When using time-varying limits, the color scale (and scalar bars, if enabled) will change
         over time.
     title_template
         Optional per-frame title template formatted with time in ms.
@@ -899,79 +952,211 @@ def plot_surf_video(
     if framerate <= 0:
         raise ValueError("`framerate` must be > 0.")
 
-    _, n_verts = _load_surface(surf)
-    vertex_ts, _ = _prepare_timeseries_scalars(data_timeseries, rois=rois, n_verts=n_verts)
-    n_frames = vertex_ts.shape[1]
-    if n_frames == 0:
-        raise ValueError("`data_timeseries` must have at least one frame.")
+    views_use: List[str]
+    if views is None:
+        if isinstance(view, (list, tuple)):
+            views_use = [str(v) for v in view]
+        else:
+            views_use = [str(view)]
+    else:
+        views_use = list(views)
+        if isinstance(view, (list, tuple)) or (isinstance(view, str) and view != "lateral"):
+            raise ValueError("Pass either `view` or `views` (not both).")
+    if len(views_use) == 0:
+        raise ValueError("`views` must contain at least one view.")
 
-    clim_norm = _normalize_video_clim(clim, n_frames=n_frames, vertex_ts=vertex_ts)
-    clim_fixed: Optional[Tuple[float, float]]
-    clim_per_frame: Optional[np.ndarray]
+    # Disambiguate hemisphere dict vs single-surface dict.
+    is_single_surface_dict = (
+        isinstance(surf, Mapping)
+        and (("v" in surf and "t" in surf) or ("vertices" in surf and "faces" in surf))
+    )
+    is_hemi_mapping = isinstance(surf, Mapping) and (not is_single_surface_dict)
+
+    if is_hemi_mapping:
+        surf_by_hemi: Mapping[str, Any] = surf
+        if not isinstance(data_timeseries, Mapping):
+            raise ValueError(
+                "When `surf` is a hemisphere mapping, `data_timeseries` must be a dict with matching hemisphere keys."
+            )
+        data_by_hemi = data_timeseries
+        if rois is not None and (not isinstance(rois, Mapping)):
+            raise ValueError("When `surf` is a hemisphere mapping, `rois` must be a dict (or None).")
+        rois_by_hemi: Mapping[str, Optional[np.ndarray]] = (
+            {k: np.asarray(v) for k, v in rois.items()} if isinstance(rois, Mapping) else {}
+        )
+    else:
+        surf_by_hemi = {"surf": surf}
+        data_by_hemi = {"surf": np.asarray(data_timeseries)}
+        rois_by_hemi = {"surf": None if rois is None else np.asarray(rois)}
+
+    hemis = list(surf_by_hemi.keys())
+    if len(hemis) == 0:
+        raise ValueError("`surf` must contain at least one hemisphere/surface.")
+
+    # Load surfaces + normalize timeseries per hemi.
+    vertex_ts_by_hemi: Dict[str, np.ndarray] = {}
+    n_frames: Optional[int] = None
+    n_maps: Optional[int] = None
+    abs_max = 0.0
+
+    for hemi in hemis:
+        if hemi not in data_by_hemi:
+            raise ValueError(f"Missing data for hemisphere '{hemi}'.")
+        poly, n_verts = _load_surface(surf_by_hemi[hemi])
+        arr_ts, _ = _prepare_timeseries_scalars(
+            data_by_hemi[hemi],
+            rois=None if rois is None else rois_by_hemi.get(hemi, None),
+            n_verts=n_verts,
+        )
+        if arr_ts.shape[1] == 0:
+            raise ValueError("`data_timeseries` must have at least one frame.")
+        if arr_ts.ndim == 2:
+            arr_ts = arr_ts[:, :, np.newaxis]
+        if n_frames is None:
+            n_frames = int(arr_ts.shape[1])
+        elif int(arr_ts.shape[1]) != n_frames:
+            raise ValueError("All hemispheres must have the same number of frames.")
+
+        if n_maps is None:
+            n_maps = int(arr_ts.shape[2])
+        elif int(arr_ts.shape[2]) != n_maps:
+            raise ValueError("All hemispheres must have the same number of maps.")
+
+        vertex_ts_by_hemi[hemi] = arr_ts
+        hemi_abs = float(np.nanmax(np.abs(arr_ts)))
+        if np.isfinite(hemi_abs):
+            abs_max = max(abs_max, hemi_abs)
+
+    assert n_frames is not None
+    assert n_maps is not None
+
+    clim_norm = _normalize_video_clim(
+        clim,
+        n_frames=n_frames,
+        n_maps=n_maps,
+        vertex_ts=np.asarray([abs_max], dtype=float),
+    )
+    clim_fixed: Optional[Tuple[float, float]] = None
+    clim_array: Optional[np.ndarray] = None
     if isinstance(clim_norm, tuple):
         clim_fixed = clim_norm
-        clim_per_frame = None
-        clim_first = clim_fixed
     else:
-        clim_fixed = None
-        clim_per_frame = clim_norm
-        clim_first = (float(clim_per_frame[0, 0]), float(clim_per_frame[0, 1]))
+        clim_array = clim_norm
 
+    # Layout matches `plot_surf`.
+    n_hemi = len(hemis)
+    n_views = len(views_use)
+
+    if layout_indiv == "row":
+        indiv_rows, indiv_cols = 1, n_hemi * n_views
+    elif layout_indiv == "col":
+        indiv_rows, indiv_cols = n_hemi * n_views, 1
+    elif layout_indiv == "grid":
+        indiv_rows, indiv_cols = n_views, n_hemi
+    else:
+        raise ValueError("`layout_indiv` must be one of 'row', 'col', or 'grid'.")
+
+    if layout_group == "row":
+        rows, cols = indiv_rows, indiv_cols * n_maps
+    elif layout_group == "col":
+        rows, cols = indiv_rows * n_maps, indiv_cols
+    else:
+        raise ValueError("`layout_group` must be one of 'row' or 'col'.")
+
+    panel_w, panel_h = size
+    window_size = (int(panel_w * cols), int(panel_h * rows))
     out_path = str(filename)
 
-    plotter = pv.Plotter(off_screen=True, window_size=size, border=False)
+    mirror_rh = ("lh" in hemis and "rh" in hemis)
+    reverse_rh_view_order = mirror_rh and (layout_indiv in ("row", "col"))
+
+    plotter = pv.Plotter(shape=(rows, cols), off_screen=True, window_size=window_size, border=False)
     try:
-        surface_mesh, actor, _ = _add_surface_to_plotter(
-            plotter,
-            surf=surf,
-            data=vertex_ts[:, 0],
-            rois=rois,
-            cbar=cbar,
-            cmap=cmap,
-            mesh_edges=mesh_edges,
-            roi_outlines=roi_outlines,
-            scalar_bar_args=scalar_bar_args,
-            clim=clim_first,
-        )
+        # Each cell stores: (hemi, map_idx, scalars_array, actor)
+        cell_refs: List[Tuple[str, int, np.ndarray, Optional[Any]]] = []
 
-        plotter.hide_axes()
-        _finalize_camera(plotter, view=view, zoom=zoom)
+        for map_idx in range(n_maps):
+            if layout_group == "row":
+                row_offset, col_offset = 0, map_idx * indiv_cols
+            else:
+                row_offset, col_offset = map_idx * indiv_rows, 0
 
-        if "scalars" not in surface_mesh.point_data:
-            raise RuntimeError("Internal error: expected 'scalars' point_data on the rendered mesh.")
+            for h_idx, hemi in enumerate(hemis):
+                hemi_views = list(views_use)[::-1] if (hemi == "rh" and reverse_rh_view_order) else list(views_use)
 
-        scalars_arr = surface_mesh.point_data["scalars"]
+                for v_idx, view_name in enumerate(hemi_views):
+                    camera_view = _rh_view_swap(view_name) if hemi == "rh" else view_name
+
+                    if layout_indiv == "row":
+                        r0, c0 = 0, h_idx * n_views + v_idx
+                    elif layout_indiv == "col":
+                        r0, c0 = h_idx * n_views + v_idx, 0
+                    else:  # grid
+                        r0, c0 = v_idx, h_idx
+
+                    r, c = r0 + row_offset, c0 + col_offset
+                    plotter.subplot(r, c)
+
+                    if clim_fixed is not None:
+                        clim_first = clim_fixed
+                    else:
+                        assert clim_array is not None
+                        if n_maps == 1:
+                            clim_first = (float(clim_array[0, 0]), float(clim_array[0, 1]))
+                        else:
+                            clim_first = (float(clim_array[0, map_idx, 0]), float(clim_array[0, map_idx, 1]))
+
+                    mesh_used, actor, _ = _add_surface_to_plotter(
+                        plotter,
+                        surf=surf_by_hemi[hemi],
+                        data=vertex_ts_by_hemi[hemi][:, 0, map_idx],
+                        rois=None if rois is None else rois_by_hemi.get(hemi, None),
+                        cbar=cbar,
+                        cmap=cmap,
+                        mesh_edges=mesh_edges,
+                        roi_outlines=roi_outlines,
+                        scalar_bar_args=scalar_bar_args,
+                        clim=clim_first,
+                    )
+
+                    plotter.hide_axes()
+                    _finalize_camera(plotter, view=camera_view, zoom=zoom)
+
+                    if "scalars" not in mesh_used.point_data:
+                        raise RuntimeError("Internal error: expected 'scalars' point_data on the rendered mesh.")
+                    scalars_arr = mesh_used.point_data["scalars"]
+                    cell_refs.append((hemi, map_idx, scalars_arr, actor))
 
         try:
             plotter.open_movie(out_path, framerate=int(framerate))
         except Exception as e:
             raise RuntimeError(
-                "Failed to open movie writer. PyVista typically requires ffmpeg for MP4 output; "
-                "install ffmpeg and retry."
+                "Failed to open movie writer. PyVista typically requires ffmpeg for MP4 output; install ffmpeg and retry."
             ) from e
 
         plotter.show(auto_close=False)
 
         for frame_idx in range(n_frames):
-            scalars_arr[:] = vertex_ts[:, frame_idx]
+            for hemi, map_idx, scalars_arr, actor in cell_refs:
+                scalars_arr[:] = vertex_ts_by_hemi[hemi][:, frame_idx, map_idx]
 
-            clim_use = (
-                clim_fixed
-                if clim_fixed is not None
-                else (float(clim_per_frame[frame_idx, 0]), float(clim_per_frame[frame_idx, 1]))
-            )
+                if clim_fixed is not None:
+                    clim_use = clim_fixed
+                else:
+                    assert clim_array is not None
+                    if n_maps == 1:
+                        clim_use = (float(clim_array[frame_idx, 0]), float(clim_array[frame_idx, 1]))
+                    else:
+                        clim_use = (
+                            float(clim_array[frame_idx, map_idx, 0]),
+                            float(clim_array[frame_idx, map_idx, 1]),
+                        )
 
-            if actor is not None:
-                try:
-                    actor.mapper.scalar_range = clim_use
-                except Exception:
-                    pass
-
-            if cbar:
-                try:
-                    plotter.update_scalar_bar_range(clim_use)
-                except Exception:
-                    pass
+                if actor is not None:
+                    try:
+                        actor.mapper.scalar_range = clim_use
+                    except Exception:
+                        pass
 
             if title_template:
                 time_ms = frame_idx * (1000.0 / float(framerate))

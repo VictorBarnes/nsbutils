@@ -101,6 +101,33 @@ def test_prepare_timeseries_scalars_roiwise_expands():
     assert np.allclose(vts[3:5, :], ts_roi[1, :])
 
 
+def test_prepare_timeseries_scalars_vertexwise_3d_masks_medial_wall():
+    rois = np.array([0, 1, 1, 2, 2])
+    ts = np.arange(rois.size * 3 * 2, dtype=float).reshape(rois.size, 3, 2)
+    vts, roi_labels = _prepare_timeseries_scalars(ts, rois=rois, n_verts=rois.size)
+
+    assert roi_labels is not None
+    assert vts.shape == ts.shape
+    assert np.allclose(vts[1:, :, :], ts[1:, :, :])
+    assert np.all(np.isnan(vts[0, :, :]))
+
+
+def test_prepare_timeseries_scalars_roiwise_3d_expands():
+    rois = np.array([0, 1, 1, 2, 2])
+    ts_roi = np.array(
+        [
+            [[10.0, 100.0], [11.0, 101.0], [12.0, 102.0]],
+            [[20.0, 200.0], [21.0, 201.0], [22.0, 202.0]],
+        ]
+    )
+    vts, roi_labels = _prepare_timeseries_scalars(ts_roi, rois=rois, n_verts=rois.size)
+    assert roi_labels is not None
+    assert vts.shape == (rois.size, 3, 2)
+    assert np.all(np.isnan(vts[0, :, :]))
+    assert np.allclose(vts[1:3, :, :], ts_roi[0, :, :])
+    assert np.allclose(vts[3:5, :, :], ts_roi[1, :, :])
+
+
 def test_normalize_video_clim_none_uses_global_symmetric():
     # vertex_ts: (n_verts, n_frames)
     vertex_ts = np.array(
@@ -161,6 +188,48 @@ def test_normalize_video_clim_partially_nonfinite_row_raises():
     clim_in = np.array([[np.nan, 1.0]])
     with pytest.raises(ValueError):
         _normalize_video_clim(clim_in, n_frames=1, vertex_ts=vertex_ts)
+
+
+def test_normalize_video_clim_fixed_tuple_broadcasts_for_multi_map():
+    vertex_ts = np.zeros((2, 3, 4), dtype=float)
+    clim = _normalize_video_clim((-1, 2), n_frames=3, n_maps=4, vertex_ts=vertex_ts)
+    assert isinstance(clim, np.ndarray)
+    assert clim.shape == (3, 4, 2)
+    assert np.allclose(clim[0, :, :], np.array([[-1.0, 2.0]] * 4))
+
+
+def test_normalize_video_clim_per_frame_broadcasts_for_multi_map():
+    vertex_ts = np.zeros((2, 3, 2), dtype=float)
+    clim_in = np.array([[-1.0, 1.0], [0.0, 2.0], [-2.0, 3.0]])
+    clim = _normalize_video_clim(clim_in, n_frames=3, n_maps=2, vertex_ts=vertex_ts)
+    assert isinstance(clim, np.ndarray)
+    assert clim.shape == (3, 2, 2)
+    assert np.allclose(clim[:, 0, :], clim_in)
+    assert np.allclose(clim[:, 1, :], clim_in)
+
+
+def test_normalize_video_clim_per_map_broadcasts_for_multi_frame():
+    vertex_ts = np.zeros((2, 5, 3), dtype=float)
+    clim_in = np.array([[-1.0, 1.0], [0.0, 2.0], [-2.0, 3.0]])
+    clim = _normalize_video_clim(clim_in, n_frames=5, n_maps=3, vertex_ts=vertex_ts)
+    assert isinstance(clim, np.ndarray)
+    assert clim.shape == (5, 3, 2)
+    assert np.allclose(clim[0, :, :], clim_in)
+    assert np.allclose(clim[-1, :, :], clim_in)
+
+
+def test_normalize_video_clim_per_frame_per_map_validates_shape():
+    vertex_ts = np.zeros((2, 2, 3), dtype=float)
+    clim_in = np.array(
+        [
+            [[-1.0, 1.0], [0.0, 2.0], [-2.0, 3.0]],
+            [[-1.0, 1.0], [0.0, 2.0], [-2.0, 3.0]],
+        ]
+    )
+    clim = _normalize_video_clim(clim_in, n_frames=2, n_maps=3, vertex_ts=vertex_ts)
+    assert isinstance(clim, np.ndarray)
+    assert clim.shape == (2, 3, 2)
+    assert np.allclose(clim, clim_in)
 
 
 def test_normalize_maps_clim_none_passthrough():
