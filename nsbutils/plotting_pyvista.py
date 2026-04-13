@@ -23,6 +23,21 @@ if TYPE_CHECKING:
 _DEFAULT_PANEL_SIZE: Tuple[int, int] = (400, 300)  # (width, height) in pixels
 
 
+def _enable_pyvista_off_screen() -> None:
+    """Best-effort setup for robust off-screen rendering in headless environments."""
+
+    try:
+        pv.OFF_SCREEN = True
+    except Exception:
+        pass
+
+    try:
+        # TODO: `pv.start_xvfb` is deprecated. Install vtk with osmesa instead
+        pv.start_xvfb(wait=0.05)
+    except Exception:
+        pass
+
+
 def _validate_clim(clim: Optional[Tuple[float, float]]) -> Optional[Tuple[float, float]]:
     if clim is None:
         return None
@@ -678,6 +693,7 @@ def plot_surf_single(
     """
 
     if ax is not None:
+        _enable_pyvista_off_screen()
         panel_size = size or _DEFAULT_PANEL_SIZE
         if scale <= 0:
             raise ValueError("`scale` must be > 0.")
@@ -749,6 +765,7 @@ def plot_surf(
     roi_outlines: bool = False,
     *,
     ax: Optional[Axes] = None,
+    off_screen: bool = False,
     scale: float = 1.0,
     clim: Optional[Union[Tuple[float, float], np.ndarray]] = None,
     scalar_bar_args: Optional[Dict[str, Any]] = None,
@@ -763,6 +780,8 @@ def plot_surf(
         - None: let PyVista choose limits per mesh (default)
         - (vmin, vmax): fixed limits applied to every map
         - array-like of shape (n_maps, 2): per-map limits, one (vmin, vmax) pair per map
+    off_screen
+        If True, force off-screen rendering for PyVista.
     """
 
     hemis = list(surf.keys())
@@ -816,11 +835,14 @@ def plot_surf(
     panel_w, panel_h = size
     window_size = (int(panel_w * cols), int(panel_h * rows))
 
-    off_screen = ax is not None
+    off_screen_use = (ax is not None) or bool(off_screen)
+    if off_screen_use:
+        _enable_pyvista_off_screen()
+
     plotter = pv.Plotter(
         shape=(rows, cols),
         window_size=window_size,
-        off_screen=off_screen,
+        off_screen=off_screen_use,
         border=False,
     )
 
