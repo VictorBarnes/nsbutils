@@ -2,12 +2,16 @@ import numpy as np
 import pytest
 
 from nsbutils.plotting_pyvista import (
+    _auto_gradient_vector_max_length,
+    _clip_vectors_to_max_length,
+    _prepare_triangle_vectors,
     _normalize_maps_clim,
     _normalize_video_clim,
     _prepare_timeseries_scalars,
     _prepare_vertex_scalars,
     _rh_view_swap,
     _validate_clim,
+    downsample_triangle_vectors_by_vertex_mask,
 )
 
 
@@ -261,3 +265,113 @@ def test_normalize_maps_clim_degenerate_row_expands():
     assert isinstance(clim, np.ndarray)
     assert clim.shape == (1, 2)
     assert clim[0, 0] < clim[0, 1]
+
+
+def test_prepare_triangle_vectors_accepts_shape_and_allows_nan():
+    grads = np.array([[1.0, 0.0, 0.0], [np.nan, np.nan, np.nan]], dtype=float)
+    out = _prepare_triangle_vectors(grads, n_triangles=2)
+    assert out is not None
+    assert out.shape == (2, 3)
+    assert np.allclose(out[0], [1.0, 0.0, 0.0])
+    assert np.isnan(out[1]).all()
+
+
+def test_prepare_triangle_vectors_raises_on_bad_shape():
+    with pytest.raises(ValueError):
+        _prepare_triangle_vectors(np.zeros((3,)), n_triangles=1)
+    with pytest.raises(ValueError):
+        _prepare_triangle_vectors(np.zeros((2, 2)), n_triangles=2)
+    with pytest.raises(ValueError):
+        _prepare_triangle_vectors(np.zeros((3, 3)), n_triangles=2)
+
+
+def test_auto_gradient_vector_max_length_uses_bbox_diagonal_fraction():
+    class DummyMesh:
+        # bounds = (xmin, xmax, ymin, ymax, zmin, zmax)
+        bounds = (0.0, 2.0, -1.0, 1.0, 0.0, 0.0)
+
+    max_len = _auto_gradient_vector_max_length(DummyMesh())
+    diag = np.sqrt((2.0 - 0.0) ** 2 + (1.0 - (-1.0)) ** 2 + (0.0 - 0.0) ** 2)
+    assert np.isfinite(max_len)
+    assert np.allclose(max_len, 0.05 * diag)
+
+
+def test_clip_vectors_to_max_length_scales_down_only():
+    vecs = np.array(
+        [
+            [3.0, 0.0, 0.0],
+            [0.0, 4.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ]
+    )
+    out = _clip_vectors_to_max_length(vecs, max_length=2.0)
+    assert out.shape == vecs.shape
+    assert np.allclose(out[0], [2.0, 0.0, 0.0])
+    assert np.allclose(out[1], [0.0, 2.0, 0.0])
+    assert np.allclose(out[2], [0.0, 0.0, 0.0])
+
+
+def test_clip_vectors_to_max_length_raises_on_invalid_max_length():
+    with pytest.raises(ValueError):
+        _clip_vectors_to_max_length(np.zeros((1, 3)), max_length=0.0)
+    with pytest.raises(ValueError):
+        _clip_vectors_to_max_length(np.zeros((1, 3)), max_length=float("nan"))
+
+
+def test_downsample_triangle_vectors_by_vertex_mask_selects_unique_cells():
+    # Simple square split into two triangles
+    verts = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ]
+    )
+    faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
+    surf = (verts, faces)
+
+    gradients = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=float)
+    vertex_mask = np.array([True, False, True, False])
+
+    ds, cell_ids = downsample_triangle_vectors_by_vertex_mask(gradients, surf, vertex_mask)
+    assert ds.shape == gradients.shape
+    assert cell_ids.ndim == 1
+    assert np.all(cell_ids >= 0)
+    assert np.all(cell_ids < gradients.shape[0])
+    assert np.unique(cell_ids).size == cell_ids.size
+
+    # Only selected rows are non-NaN
+    keep = np.zeros(gradients.shape[0], dtype=bool)
+    keep[cell_ids] = True
+    assert np.all(np.isfinite(ds[keep]).all(axis=1))
+    assert np.isnan(ds[~keep]).all()
+
+    # Selected rows match the original values
+    assert np.allclose(ds[keep], gradients[keep])
+
+
+def test_downsample_triangle_vectors_by_vertex_mask_empty_mask_returns_all_nan():
+    verts = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    faces = np.array([[0, 1, 2]], dtype=np.int64)
+    surf = (verts, faces)
+
+    gradients = np.array([[1.0, 2.0, 3.0]], dtype=float)
+    vertex_mask = np.array([False, False, False])
+
+    ds, cell_ids = downsample_triangle_vectors_by_vertex_mask(gradients, surf, vertex_mask)
+    assert ds.shape == (1, 3)
+    assert np.isnan(ds).all()
+    assert cell_ids.size == 0
+
+
+def test_downsample_triangle_vectors_by_vertex_mask_raises_on_shape_mismatch():
+    verts = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    faces = np.array([[0, 1, 2]], dtype=np.int64)
+    surf = (verts, faces)
+
+    with pytest.raises(ValueError):
+        downsample_triangle_vectors_by_vertex_mask(np.zeros((2, 3)), surf, np.array([True, False, False]))
+
+    with pytest.raises(ValueError):
+        downsample_triangle_vectors_by_vertex_mask(np.zeros((1, 3)), surf, np.array([True, False]))

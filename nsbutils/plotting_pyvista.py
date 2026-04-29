@@ -22,6 +22,11 @@ if TYPE_CHECKING:
 
 _DEFAULT_PANEL_SIZE: Tuple[int, int] = (400, 300)  # (width, height) in pixels
 
+# Gradient-vector overlay: clip displayed vectors to a fixed fraction of the mesh
+# bounding-box diagonal (proxy for overall brain size). This prevents a few
+# extreme triangles from producing unreadably large arrows.
+_GRADIENT_VECTOR_MAXLEN_FRAC_BBOX_DIAG: float = 0.02
+
 
 def _enable_pyvista_off_screen() -> None:
     """Best-effort setup for robust off-screen rendering in headless environments."""
@@ -437,6 +442,184 @@ def _prepare_vertex_scalars(
     return vertex_data, roi_labels
 
 
+def _prepare_triangle_vectors(
+    gradients: Optional[np.ndarray],
+    *,
+    n_triangles: int,
+) -> Optional[np.ndarray]:
+    """Validate and normalize triangle-wise vectors.
+
+    Parameters
+    ----------
+    gradients
+        Triangle-wise vectors of shape ``(n_triangles, 3)``.
+        Rows may contain NaNs; these will be skipped during rendering.
+    n_triangles
+        Expected number of triangles/cells in the mesh.
+
+    Returns
+    -------
+    np.ndarray | None
+        Array of shape ``(n_triangles, 3)`` (float) or None.
+    """
+
+    if gradients is None:
+        return None
+
+    arr = np.asarray(gradients, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] != 3:
+        raise ValueError(f"`gradients` must have shape (n_triangles, 3); got {arr.shape}.")
+    if arr.shape[0] != int(n_triangles):
+        raise ValueError(
+            f"`gradients` first dimension must match n_triangles={n_triangles}; got {arr.shape[0]}."
+        )
+    return arr
+
+
+def _auto_gradient_vector_max_length(mesh: Any) -> float:
+    """Compute an automatic cap for displayed gradient-vector lengths.
+
+    Uses a fixed fraction of the mesh axis-aligned bounding-box diagonal.
+    If the diagonal is degenerate or non-finite, returns np.inf (no clipping).
+    """
+
+    try:
+        bounds = getattr(mesh, "bounds")
+        b = np.asarray(bounds, dtype=float).reshape(-1)
+        if b.size != 6:
+            raise ValueError
+        dx = float(b[1] - b[0])
+        dy = float(b[3] - b[2])
+        dz = float(b[5] - b[4])
+    except Exception:
+        # Fallback: compute bounds from points if available.
+        try:
+            pts = np.asarray(getattr(mesh, "points"), dtype=float)
+        except Exception:
+            return float("inf")
+        if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] == 0:
+            return float("inf")
+        mins = np.nanmin(pts, axis=0)
+        maxs = np.nanmax(pts, axis=0)
+        dx = float(maxs[0] - mins[0])
+        dy = float(maxs[1] - mins[1])
+        dz = float(maxs[2] - mins[2])
+
+    diag = float(np.sqrt(dx * dx + dy * dy + dz * dz))
+    if (not np.isfinite(diag)) or diag <= 0:
+        return float("inf")
+
+    frac = float(_GRADIENT_VECTOR_MAXLEN_FRAC_BBOX_DIAG)
+    if (not np.isfinite(frac)) or frac <= 0:
+        return float("inf")
+
+    return frac * diag
+
+
+def _clip_vectors_to_max_length(vecs: np.ndarray, *, max_length: float) -> np.ndarray:
+    """Row-wise clip so that each vector has norm <= max_length."""
+
+    if not np.isfinite(float(max_length)):
+        raise ValueError("`max_length` must be finite.")
+    if float(max_length) <= 0:
+        raise ValueError("`max_length` must be > 0.")
+
+    arr = np.asarray(vecs, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] != 3:
+        raise ValueError(f"Expected vecs shape (n, 3), got {arr.shape}.")
+
+    norms = np.linalg.norm(arr, axis=1)
+    out = arr.copy()
+    nonzero = norms > 0
+    scale = np.ones_like(norms)
+    scale[nonzero] = np.minimum(1.0, float(max_length) / norms[nonzero])
+    out *= scale[:, np.newaxis]
+    return out
+
+
+def downsample_triangle_vectors_by_vertex_mask(
+    gradients: np.ndarray,
+    surf: Any,
+    vertex_mask: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Downsample triangle vectors using vertex sample locations.
+
+    This helper is intentionally kept outside of `plot_surf`.
+
+    Strategy (Option A)
+    -------------------
+    - Treat `vertex_mask` as a set of sample locations on the surface.
+    - For each selected vertex, pick the closest triangle (cell) via
+      `mesh.find_closest_cell(mesh.points[vertex_mask])`.
+    - Deduplicate the resulting cell ids.
+    - Return a NaN-masked triangle-vector array of the same shape as the input.
+
+    Parameters
+    ----------
+    gradients
+        Triangle-wise vectors of shape ``(n_triangles, 3)``.
+    surf
+        Surface mesh in any of the formats accepted by `plot_surf`/`plot_surf_single`
+        (e.g., ``(verts, faces)`` tuple, dict with ``{"v","t"}`` or
+        ``{"vertices","faces"}``, file path, etc). You may also pass a
+        `pyvista.PolyData` directly.
+    vertex_mask
+        Boolean array of shape ``(n_vertices,)`` selecting sample vertices.
+
+    Returns
+    -------
+    gradients_ds, cell_ids
+        `gradients_ds` has shape ``(n_triangles, 3)`` with non-selected rows set to NaN.
+        `cell_ids` are the unique selected triangle ids.
+    """
+
+    if surf is None:
+        raise ValueError("`surf` must be provided.")
+
+    # Accept a pre-loaded PyVista mesh-like object, otherwise load from `surf`.
+    if hasattr(surf, "n_cells") and hasattr(surf, "n_points") and hasattr(surf, "points"):
+        mesh = surf
+    else:
+        mesh, _ = _load_surface(surf)
+
+    grads = np.asarray(gradients, dtype=float)
+    if grads.ndim != 2 or grads.shape[1] != 3:
+        raise ValueError(f"`gradients` must have shape (n_triangles, 3); got {grads.shape}.")
+    n_triangles = int(getattr(mesh, "n_cells", -1))
+    if n_triangles <= 0:
+        raise ValueError("Loaded mesh must have a positive number of cells.")
+    if grads.shape[0] != n_triangles:
+        raise ValueError(
+            f"`gradients` first dimension must match mesh.n_cells={n_triangles}; got {grads.shape[0]}."
+        )
+
+    vmask = np.asarray(vertex_mask, dtype=bool)
+    n_points = int(getattr(mesh, "n_points", -1))
+    if n_points <= 0:
+        raise ValueError("Loaded mesh must have a positive number of points.")
+    if vmask.shape != (n_points,):
+        raise ValueError(f"`vertex_mask` must have shape (mesh.n_points,) = ({n_points},); got {vmask.shape}.")
+
+    if not np.any(vmask):
+        out = np.full_like(grads, np.nan, dtype=float)
+        return out, np.asarray([], dtype=np.int64)
+
+    sample_points = np.asarray(mesh.points)[vmask]
+    try:
+        cell_ids = mesh.find_closest_cell(sample_points)
+    except Exception as e:
+        raise RuntimeError("Failed to query closest cells from mesh; ensure `mesh` is a valid PyVista PolyData.") from e
+
+    cell_ids_arr = np.asarray(cell_ids, dtype=np.int64).reshape(-1)
+    cell_ids_arr = cell_ids_arr[cell_ids_arr >= 0]
+    cell_ids_arr = np.unique(cell_ids_arr)
+
+    out = np.full_like(grads, np.nan, dtype=float)
+    if cell_ids_arr.size:
+        out[cell_ids_arr] = grads[cell_ids_arr]
+    return out, cell_ids_arr
+
+
 def _prepare_timeseries_scalars(
     data_timeseries: np.ndarray,
     rois: Optional[np.ndarray],
@@ -587,11 +770,13 @@ def _add_surface_to_plotter(
     surf: Any,
     data: Optional[np.ndarray],
     rois: Optional[np.ndarray],
+    gradients: Optional[np.ndarray],
     *,
     cbar: bool,
     cmap: Union[str, Any],
     mesh_edges: bool,
     roi_outlines: bool,
+    gradient_scale: float,
     scalar_bar_args: Optional[Dict[str, Any]],
     clim: Optional[Tuple[float, float]],
 ) -> Tuple[Any, Optional[Any], Optional[np.ndarray]]:
@@ -601,6 +786,11 @@ def _add_surface_to_plotter(
 
     mesh, n_verts = _load_surface(surf)
     vertex_data, roi_labels = _prepare_vertex_scalars(data, rois, n_verts)
+    triangle_vectors = _prepare_triangle_vectors(gradients, n_triangles=int(mesh.n_cells))
+    if not np.isfinite(float(gradient_scale)):
+        raise ValueError("`gradient_scale` must be finite.")
+    if float(gradient_scale) < 0:
+        raise ValueError("`gradient_scale` must be >= 0.")
     validated_clim = _validate_clim(clim)
 
     show_scalar_bar = bool(cbar and vertex_data is not None)
@@ -661,6 +851,32 @@ def _add_surface_to_plotter(
         if outline_poly.n_points:
             plotter.add_mesh(outline_poly, color="black", line_width=1.7)
 
+    if triangle_vectors is not None:
+        centers = np.asarray(mesh_used.cell_centers().points)
+        vecs = triangle_vectors
+        finite = np.isfinite(centers).all(axis=1) & np.isfinite(vecs).all(axis=1)
+        if np.any(finite):
+            csel = centers[finite]
+            vsel = vecs[finite]
+            vec_disp = float(gradient_scale) * vsel
+            max_len = _auto_gradient_vector_max_length(mesh_used)
+            if np.isfinite(float(max_len)):
+                vec_disp = _clip_vectors_to_max_length(vec_disp, max_length=float(max_len))
+
+            endpoints = csel + vec_disp
+
+            # Build nan-separated segments arrays: [x0, x1, nan] repeated
+            xe = np.empty(csel.shape[0] * 3, dtype=float)
+            ye = np.empty_like(xe)
+            ze = np.empty_like(xe)
+            xe[0::3], xe[1::3], xe[2::3] = csel[:, 0], endpoints[:, 0], np.nan
+            ye[0::3], ye[1::3], ye[2::3] = csel[:, 1], endpoints[:, 1], np.nan
+            ze[0::3], ze[1::3], ze[2::3] = csel[:, 2], endpoints[:, 2], np.nan
+
+            vec_poly = _polydata_from_nan_separated_segments(pv, xe, ye, ze)
+            if vec_poly.n_points:
+                plotter.add_mesh(vec_poly, color="black", line_width=2.0)
+
     return mesh_used, actor, roi_labels
 
 
@@ -677,10 +893,12 @@ def plot_surf_single(
     cmap: Union[str, Any] = "turbo",
     mesh_edges: bool = False,
     roi_outlines: bool = False,
+    gradients: Optional[np.ndarray] = None,
     *,
     ax: Optional[Axes] = None,
     scale: float = 1.0,
     clim: Optional[Union[Tuple[float, float], np.ndarray]] = None,
+    gradient_scale: float = 1.0,
     scalar_bar_args: Optional[Dict[str, Any]] = None,
 ) -> Optional[Any]:
     """Render a single surface into a PyVista subplot or embed into a Matplotlib axis.
@@ -690,6 +908,13 @@ def plot_surf_single(
 
     Parameters are intentionally aligned with the Plotly version, except `plot_surf_single`
     does not take Plotly-specific `fig/row/col`.
+
+    Notes
+    -----
+    When `gradients` is provided, the displayed gradient vectors are automatically
+    clipped to a fixed fraction (currently 5%) of the surface mesh bounding-box
+    diagonal, to prevent extreme outliers from producing unreadably large arrows.
+    Use `gradient_scale` to tune overall vector visibility.
     """
 
     if ax is not None:
@@ -713,7 +938,9 @@ def plot_surf_single(
                 cmap=cmap,
                 mesh_edges=mesh_edges,
                 roi_outlines=roi_outlines,
+                gradients=gradients,
                 clim=clim,
+                gradient_scale=gradient_scale,
                 scalar_bar_args=scalar_bar_args,
             )
             image = p.screenshot(return_img=True, transparent_background=False)
@@ -736,10 +963,12 @@ def plot_surf_single(
         surf=surf,
         data=data,
         rois=rois,
+        gradients=gradients,
         cbar=cbar,
         cmap=cmap,
         mesh_edges=mesh_edges,
         roi_outlines=roi_outlines,
+        gradient_scale=gradient_scale,
         scalar_bar_args=scalar_bar_args,
         clim=clim,
     )
@@ -754,6 +983,7 @@ def plot_surf(
     surf: Mapping[str, Any],
     data: Optional[Mapping[str, np.ndarray]] = None,
     rois: Optional[Mapping[str, np.ndarray]] = None,
+    gradients: Optional[Mapping[str, np.ndarray]] = None,
     views: List[str] = ["lateral"],
     layout_indiv: str = "row",
     layout_group: str = "row",
@@ -768,6 +998,7 @@ def plot_surf(
     off_screen: bool = False,
     scale: float = 1.0,
     clim: Optional[Union[Tuple[float, float], np.ndarray]] = None,
+    gradient_scale: float = 1.0,
     scalar_bar_args: Optional[Dict[str, Any]] = None,
 ) -> Optional[Any]:
     """Plot surface data across hemispheres, views, and (optionally) multiple maps.
@@ -782,6 +1013,12 @@ def plot_surf(
         - array-like of shape (n_maps, 2): per-map limits, one (vmin, vmax) pair per map
     off_screen
         If True, force off-screen rendering for PyVista.
+
+    Notes
+    -----
+    When `gradients` is provided, the displayed gradient vectors are automatically
+    clipped to a fixed fraction (currently 5%) of the surface mesh bounding-box
+    diagonal. Use `gradient_scale` to tune overall vector visibility.
     """
 
     hemis = list(surf.keys())
@@ -805,6 +1042,16 @@ def plot_surf(
             if data2[hemi].shape[1] != n_maps:
                 raise ValueError("All hemispheres must have the same number of maps.")
         data = data2
+
+    if gradients is not None and n_maps != 1:
+        raise ValueError(
+            "Gradient overlay currently supports only a single map (n_maps == 1). "
+            "Provide single-map `data` or call `plot_surf` once per map."
+        )
+    if gradients is not None:
+        for hemi in hemis:
+            if hemi not in gradients:
+                raise ValueError(f"Missing gradients for hemisphere '{hemi}'.")
 
     clim_norm = _normalize_maps_clim(clim, n_maps=n_maps)
     clim_fixed: Optional[Tuple[float, float]] = None
@@ -889,7 +1136,9 @@ def plot_surf(
                     cmap=cmap,
                     mesh_edges=mesh_edges,
                     roi_outlines=roi_outlines,
+                    gradients=None if gradients is None else gradients[hemi],
                     clim=clim_use,
+                    gradient_scale=gradient_scale,
                     scalar_bar_args=scalar_bar_args,
                 )
 
